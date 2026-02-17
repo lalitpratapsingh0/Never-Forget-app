@@ -1,0 +1,1277 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Dashboard App</title>
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- TailwindCSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#4F46E5', // Indigo 600
+                        secondary: '#10B981', // Emerald 500
+                        danger: '#EF4444', // Red 500
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- BcryptJS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bcryptjs/2.4.3/bcrypt.min.js"></script>
+
+    <!-- Icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #F3F4F6;
+        }
+
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useContext, createContext, useMemo } = React;
+
+        /* ==================== UTILS & HELPERS ==================== */
+
+        // --- BACKEND SIMULATION CONSTANTS ---
+
+        // Ensure bcrypt is available (sometimes namespaced as dcodeIO.bcrypt)
+        const bcrypt = window.dcodeIO ? window.dcodeIO.bcrypt : window.bcrypt;
+
+        const DB_KEYS = {
+            USERS: 'app_users',
+            TASKS: 'app_tasks',
+            CURRENT_USER: 'app_current_user_token'
+        };
+
+        const Utils = {
+            generateId: () => Math.random().toString(36).substr(2, 9),
+
+            // Security Simulation
+            hashPassword: (password) => {
+                const salt = bcrypt.genSaltSync(10);
+                return bcrypt.hashSync(password, salt);
+            },
+            comparePassword: (password, hash) => {
+                return bcrypt.compareSync(password, hash);
+            },
+
+            delay: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+
+            // Improved JWT Simulation
+            createToken: (user) => {
+                const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+                const payload = btoa(JSON.stringify({
+                    id: user.id,
+                    username: user.username,
+                    email: user.email,
+                    name: user.name,
+                    exp: Date.now() + (3600 * 1000) // 1 hour
+                }));
+                const signature = btoa("secret_signature_simulation");
+                return `${header}.${payload}.${signature}`;
+            },
+            decodeToken: (token) => {
+                try {
+                    const parts = token.split('.');
+                    if (parts.length !== 3) return null;
+                    const payload = JSON.parse(atob(parts[1]));
+                    if (payload.exp < Date.now()) return null; // Expired
+                    return payload;
+                } catch (e) {
+                    return null;
+                }
+            }
+        };
+
+        /* ==================== SERVICES (API & DB) ==================== */
+
+        // 1. DATABASE LAYER (LocalStorage)
+        const DB = {
+            getUsers: () => JSON.parse(localStorage.getItem(DB_KEYS.USERS) || '[]'),
+            saveUsers: (users) => localStorage.setItem(DB_KEYS.USERS, JSON.stringify(users)),
+            getTasks: () => JSON.parse(localStorage.getItem(DB_KEYS.TASKS) || '[]'),
+            saveTasks: (tasks) => localStorage.setItem(DB_KEYS.TASKS, JSON.stringify(tasks)),
+        };
+
+        // 2. MIDDLEWARE LAYER
+        const Middleware = {
+            authenticate: async () => {
+                const token = localStorage.getItem(DB_KEYS.CURRENT_USER);
+                if (!token) throw new Error("Unauthorized: No token provided");
+
+                const payload = Utils.decodeToken(token);
+                if (!payload) throw new Error("Unauthorized: Invalid or expired token");
+
+                // Verify user still exists in DB
+                const users = DB.getUsers();
+                const user = users.find(u => u.id === payload.id);
+                if (!user) throw new Error("Unauthorized: User not found");
+
+                return { user }; // Attach user to request context
+            }
+        };
+
+        // 3. CONTROLLER LAYER (Business Logic)
+        const AuthController = {
+            register: async (data) => {
+                const users = DB.getUsers();
+                if (users.find(u => u.email === data.email || u.username === data.username)) {
+                    throw new Error('User already exists');
+                }
+
+                const newUser = {
+                    id: Utils.generateId(),
+                    username: data.username,
+                    email: data.email,
+                    name: data.name,
+                    password: Utils.hashPassword(data.password),
+                    avatar: `https://ui-avatars.com/api/?name=${data.name || data.username}&background=random`
+                };
+
+                users.push(newUser);
+                DB.saveUsers(users);
+                const token = Utils.createToken(newUser);
+                return { user: newUser, token };
+            },
+
+            login: async ({ email, password }) => {
+                const users = DB.getUsers();
+                const user = users.find(u => u.email === email || u.username === email);
+                if (!user || !Utils.comparePassword(password, user.password)) {
+                    throw new Error('Invalid credentials');
+                }
+                const token = Utils.createToken(user);
+                return { user, token };
+            },
+
+            getProfile: async (req) => {
+                return req.user;
+            },
+
+            updateProfile: async (req, updates) => {
+                const users = DB.getUsers();
+                const index = users.findIndex(u => u.id === req.user.id);
+                if (index === -1) throw new Error("User not found");
+
+                if (updates.password && updates.password.trim() !== "") {
+                    updates.password = Utils.hashPassword(updates.password);
+                } else {
+                    delete updates.password;
+                }
+
+                const updatedUser = { ...users[index], ...updates };
+                users[index] = updatedUser;
+                DB.saveUsers(users);
+                return updatedUser;
+            }
+        };
+
+        const TaskController = {
+            getAll: async (req) => {
+                const tasks = DB.getTasks();
+                return tasks.filter(t => t.userId === req.user.id);
+            },
+
+            create: async (req, data) => {
+                const tasks = DB.getTasks();
+                const newTask = {
+                    id: Utils.generateId(),
+                    userId: req.user.id,
+                    createdAt: new Date().toISOString(),
+                    status: 'pending',
+                    ...data
+                };
+                tasks.push(newTask);
+                DB.saveTasks(tasks);
+                return newTask;
+            },
+
+            update: async (req, id, updates) => {
+                const tasks = DB.getTasks();
+                const index = tasks.findIndex(t => t.id === id && t.userId === req.user.id);
+                if (index === -1) throw new Error('Task not found');
+
+                tasks[index] = { ...tasks[index], ...updates };
+                DB.saveTasks(tasks);
+                return tasks[index];
+            },
+
+            delete: async (req, id) => {
+                const tasks = DB.getTasks();
+                const newTasks = tasks.filter(t => !(t.id === id && t.userId === req.user.id));
+                DB.saveTasks(newTasks);
+                return true;
+            }
+        };
+
+        // 4. API LAYER (Public Service Interface)
+        const api = {
+            register: async (data) => {
+                await Utils.delay(800);
+                return AuthController.register(data);
+            },
+            login: async (creds) => {
+                await Utils.delay(800);
+                return AuthController.login(creds);
+            },
+            getProfile: async () => {
+                await Utils.delay(400);
+                const req = await Middleware.authenticate();
+                return AuthController.getProfile(req);
+            },
+            updateProfile: async (data) => {
+                await Utils.delay(800);
+                const req = await Middleware.authenticate();
+                return AuthController.updateProfile(req, data);
+            },
+            getTasks: async () => {
+                await Utils.delay(400);
+                const req = await Middleware.authenticate();
+                return TaskController.getAll(req);
+            },
+            createTask: async (data) => {
+                await Utils.delay(400);
+                const req = await Middleware.authenticate();
+                return TaskController.create(req, data);
+            },
+            updateTask: async (id, data) => {
+                await Utils.delay(300);
+                const req = await Middleware.authenticate();
+                return TaskController.update(req, id, data);
+            },
+            deleteTask: async (id) => {
+                await Utils.delay(300);
+                const req = await Middleware.authenticate();
+                return TaskController.delete(req, id);
+            }
+        };
+
+        /* ==================== CONTEXT & HOOKS ==================== */
+
+        // --- TOAST CONTEXT ---
+        const ToastContext = createContext(null);
+
+        const ToastProvider = ({ children }) => {
+            const [toasts, setToasts] = useState([]);
+
+            const addToast = (message, type = 'info') => {
+                const id = Date.now();
+                setToasts(prev => [...prev, { id, message, type }]);
+                setTimeout(() => removeToast(id), 3000);
+            };
+
+            const removeToast = (id) => {
+                setToasts(prev => prev.filter(t => t.id !== id));
+            };
+
+            return (
+                <ToastContext.Provider value={{ addToast }}>
+                    {children}
+                    <div className="fixed top-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none">
+                        {toasts.map(toast => (
+                            <div key={toast.id} className={`pointer-events-auto min-w-[300px] max-w-sm px-4 py-3 rounded-lg shadow-lg text-white transform transition-all animate-slide-in flex items-center justify-between
+                                ${toast.type === 'success' ? 'bg-green-500' : toast.type === 'error' ? 'bg-red-500' : 'bg-blue-600'}`}>
+                                <div className="flex items-center">
+                                    <i className={`mr-2 fas ${toast.type === 'success' ? 'fa-check-circle' : toast.type === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle'}`}></i>
+                                    <span className="text-sm font-medium">{toast.message}</span>
+                                </div>
+                                <button onClick={() => removeToast(toast.id)} className="ml-4 text-white hover:text-gray-200">
+                                    <i className="fas fa-times"></i>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </ToastContext.Provider>
+            );
+        };
+
+        const useToast = () => useContext(ToastContext);
+
+        // --- AUTH CHECKING & STATE MANAGEMENT ---
+
+        const AuthContext = createContext(null);
+
+        const AuthProvider = ({ children }) => {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                checkUser();
+            }, []);
+
+            const checkUser = async () => {
+                try {
+                    const token = localStorage.getItem(DB_KEYS.CURRENT_USER);
+                    if (token) {
+                        const payload = Utils.decodeToken(token);
+                        if (!payload) {
+                            throw new Error("Invalid Token");
+                        }
+                        const profile = await api.getProfile();
+                        setUser(profile);
+                    }
+                } catch (error) {
+                    console.warn("Session expired or invalid", error);
+                    logout(); // Auto-logout on checkUser failure
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const logout = () => {
+                localStorage.removeItem(DB_KEYS.CURRENT_USER);
+                setUser(null);
+            };
+
+            const login = async (email, password) => {
+                const data = await api.login({ email, password });
+                localStorage.setItem(DB_KEYS.CURRENT_USER, data.token);
+                setUser(data.user);
+            };
+
+            const signup = async (userData) => {
+                const data = await api.register(userData);
+                localStorage.setItem(DB_KEYS.CURRENT_USER, data.token);
+                setUser(data.user);
+            };
+
+
+
+            const updateUser = async (updates) => {
+                if (!user) return;
+                const updated = await api.updateProfile(updates);
+                setUser(updated);
+            };
+
+            return (
+                <AuthContext.Provider value={{ user, login, signup, logout, updateUser, loading }}>
+                    {children}
+                </AuthContext.Provider>
+            );
+        };
+
+        const useAuth = () => useContext(AuthContext);
+
+        /* ==================== COMPONENTS (UI LIBRARY) ==================== */
+
+        const Button = ({ children, onClick, type = "button", variant = "primary", className = "", disabled = false }) => {
+            const variants = {
+                primary: "bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-500/30",
+                secondary: "bg-gray-200 hover:bg-gray-300 text-gray-800",
+                danger: "bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/30",
+                ghost: "bg-transparent hover:bg-gray-100 text-gray-600"
+            };
+
+            return (
+                <button
+                    type={type}
+                    onClick={onClick}
+                    disabled={disabled}
+                    className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
+                >
+                    {children}
+                </button>
+            );
+        };
+
+        const Input = ({ label, type = "text", value, onChange, placeholder, required = false, className = "" }) => (
+            <div className={`mb-4 ${className}`}>
+                {label && <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>}
+                <input
+                    type={type}
+                    value={value}
+                    onChange={onChange}
+                    placeholder={placeholder}
+                    required={required}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                />
+            </div>
+        );
+
+        const Card = ({ children, className = "" }) => (
+            <div className={`glass-panel rounded-xl p-6 ${className}`}>
+                {children}
+            </div>
+        );
+
+        const LoadingSpinner = () => (
+            <div className="flex justify-center items-center p-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+            </div>
+        );
+
+        /* ==================== VIEWS (PAGES) ==================== */
+
+        const LoginView = ({ onSwitchToSignup }) => {
+            const { login } = useAuth();
+            const [formData, setFormData] = useState({ username: '', password: '' });
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setError('');
+                setLoading(true);
+                try {
+                    await login(formData.username, formData.password);
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4 overflow-hidden relative">
+                    {/* Background Decoration */}
+                    <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
+                        <div className="absolute top-10 left-10 w-72 h-72 bg-purple-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob"></div>
+                        <div className="absolute top-0 right-10 w-72 h-72 bg-yellow-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob animation-delay-2000"></div>
+                        <div className="absolute -bottom-8 left-20 w-72 h-72 bg-pink-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob animation-delay-4000"></div>
+                    </div>
+
+                    <Card className="w-full max-w-md bg-white/80">
+                        <h2 className="text-3xl font-bold text-center mb-6 text-gray-800">Welcome Back</h2>
+                        {error && (
+                            <div className="bg-red-50 text-red-500 p-3 rounded-lg mb-4 text-sm flex items-center">
+                                <i className="fas fa-exclamation-circle mr-2"></i> {error}
+                            </div>
+                        )}
+                        <form onSubmit={handleSubmit}>
+                            <Input
+                                label="Email or Username"
+                                value={formData.username}
+                                onChange={e => setFormData({ ...formData, username: e.target.value })}
+                                placeholder="Enter your email or username"
+                                required
+                            />
+                            <Input
+                                label="Password"
+                                type="password"
+                                value={formData.password}
+                                onChange={e => setFormData({ ...formData, password: e.target.value })}
+                                placeholder="Enter your password"
+                                required
+                            />
+                            <Button type="submit" className="w-full mt-2" disabled={loading}>
+                                {loading ? <i className="fas fa-circle-notch fa-spin"></i> : 'Sign In'}
+                            </Button>
+                        </form>
+                        <p className="mt-4 text-center text-sm text-gray-600">
+                            Don't have an account?
+                            <button onClick={onSwitchToSignup} className="ml-1 text-indigo-600 font-semibold hover:underline">Sign Up</button>
+                        </p>
+                    </Card>
+                </div>
+            );
+        };
+
+        const SignupView = ({ onSwitchToLogin }) => {
+            const { signup } = useAuth();
+            const [formData, setFormData] = useState({ name: '', username: '', email: '', password: '', confirmPassword: '' });
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setError('');
+
+                const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                if (!emailRegex.test(formData.email)) {
+                    setError("Please enter a valid email address");
+                    return;
+                }
+
+                if (formData.password !== formData.confirmPassword) {
+                    setError("Passwords do not match");
+                    return;
+                }
+                if (formData.password.length < 8) {
+                    setError("Password must be at least 8 characters");
+                    return;
+                }
+
+                setLoading(true);
+                try {
+                    const { confirmPassword, ...data } = formData;
+                    await signup(data);
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4 overflow-hidden relative">
+                    {/* Background Decoration */}
+                    <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
+                        <div className="absolute bottom-10 right-10 w-80 h-80 bg-blue-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob"></div>
+                        <div className="absolute top-20 left-20 w-80 h-80 bg-indigo-300 rounded-full mix-blend-multiply filter blur-xl opacity-70 animate-blob animation-delay-2000"></div>
+                    </div>
+
+                    <Card className="w-full max-w-md bg-white/80">
+                        <h2 className="text-3xl font-bold text-center mb-6 text-gray-800">Create Account</h2>
+                        {error && (
+                            <div className="bg-red-50 text-red-500 p-3 rounded-lg mb-4 text-sm flex items-center">
+                                <i className="fas fa-exclamation-circle mr-2"></i> {error}
+                            </div>
+                        )}
+                        <form onSubmit={handleSubmit}>
+                            <Input
+                                label="Full Name"
+                                value={formData.name}
+                                onChange={e => setFormData({ ...formData, name: e.target.value })}
+                                placeholder="Enter your full name"
+                                required
+                            />
+                            <Input
+                                label="Username"
+                                value={formData.username}
+                                onChange={e => setFormData({ ...formData, username: e.target.value })}
+                                placeholder="Choose a username"
+                                required
+                            />
+                            <Input
+                                label="Email"
+                                type="email"
+                                value={formData.email}
+                                onChange={e => setFormData({ ...formData, email: e.target.value })}
+                                placeholder="Enter your email"
+                                required
+                            />
+                            <div className="grid grid-cols-2 gap-4">
+                                <Input
+                                    label="Password"
+                                    type="password"
+                                    value={formData.password}
+                                    onChange={e => setFormData({ ...formData, password: e.target.value })}
+                                    placeholder="Create password"
+                                    required
+                                />
+                                <Input
+                                    label="Confirm"
+                                    type="password"
+                                    value={formData.confirmPassword}
+                                    onChange={e => setFormData({ ...formData, confirmPassword: e.target.value })}
+                                    placeholder="Confirm password"
+                                    required
+                                />
+                            </div>
+                            <Button type="submit" className="w-full mt-2" disabled={loading}>
+                                {loading ? <i className="fas fa-circle-notch fa-spin"></i> : 'Sign Up'}
+                            </Button>
+                        </form>
+                        <p className="mt-4 text-center text-sm text-gray-600">
+                            Already have an account?
+                            <button onClick={onSwitchToLogin} className="ml-1 text-indigo-600 font-semibold hover:underline">Log In</button>
+                        </p>
+                    </Card>
+                </div>
+            );
+        };
+
+        const Dashboard = () => {
+            const { user, logout, updateUser } = useAuth();
+            const { addToast } = useToast();
+            const [tasks, setTasks] = useState([]);
+            const [filter, setFilter] = useState('all');
+            const [search, setSearch] = useState('');
+            const [loading, setLoading] = useState(true);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [currentTask, setCurrentTask] = useState(null); // For editing
+
+            // Profile Modal State
+            const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+            const [profileForm, setProfileForm] = useState({ name: '', username: '', email: '', password: '', confirmPassword: '' });
+
+            // Task Form State
+            const [taskForm, setTaskForm] = useState({ title: '', description: '', priority: 'medium', dueDate: '' });
+
+            // Sidebar State
+            const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+            useEffect(() => {
+                if (user) {
+                    setProfileForm({
+                        name: user.name || '',
+                        username: user.username,
+                        email: user.email,
+                        password: '',
+                        confirmPassword: ''
+                    });
+                    loadTasks();
+                }
+            }, [user.id, user]);
+
+            const loadTasks = async () => {
+                setLoading(true);
+                try {
+                    const data = await api.getTasks();
+                    setTasks(data);
+                } catch (error) {
+                    console.error("Failed to load tasks", error);
+                    addToast("Failed to load tasks", 'error');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleUpdateProfile = async (e) => {
+                e.preventDefault();
+
+                // Validation
+                if (profileForm.password) {
+                    if (profileForm.password.length < 8) {
+                        addToast("Password must be at least 8 characters long.", 'error');
+                        return;
+                    }
+                    if (profileForm.password !== profileForm.confirmPassword) {
+                        addToast("Passwords do not match.", 'error');
+                        return;
+                    }
+                }
+
+                try {
+                    const updates = {
+                        name: profileForm.name,
+                        username: profileForm.username,
+                        email: profileForm.email,
+                        password: profileForm.password
+                    };
+                    await updateUser(updates);
+                    setIsProfileModalOpen(false);
+                    addToast("Profile updated successfully!", 'success');
+                } catch (error) {
+                    console.error("Profile update failed", error);
+                    addToast("Failed to update profile: " + error.message, 'error');
+                }
+            };
+
+
+            const handleCreateOrUpdate = async (e) => {
+                e.preventDefault();
+                try {
+                    if (currentTask) {
+                        const updated = await api.updateTask(currentTask.id, taskForm);
+                        setTasks(tasks.map(t => t.id === updated.id ? updated : t));
+                        addToast("Task updated successfully", 'success');
+                    } else {
+                        const newT = await api.createTask(taskForm);
+                        setTasks([...tasks, newT]);
+                        addToast("Task created successfully", 'success');
+                    }
+                    closeModal();
+                } catch (error) {
+                    console.error("Operation failed", error);
+                    addToast("Operation failed: " + error.message, 'error');
+                }
+            };
+
+            const handleDelete = async (id) => {
+                if (confirm('Are you sure you want to delete this task?')) {
+                    try {
+                        await api.deleteTask(id);
+                        setTasks(tasks.filter(t => t.id !== id));
+                        addToast("Task deleted", 'success');
+                    } catch (err) {
+                        addToast("Failed to delete task", 'error');
+                    }
+                }
+            };
+
+            const handleStatusChange = async (task, newStatus) => {
+                const updated = await api.updateTask(task.id, { status: newStatus });
+                setTasks(tasks.map(t => t.id === updated.id ? updated : t));
+            };
+
+            const openModal = (task = null) => {
+                if (task) {
+                    setCurrentTask(task);
+                    setTaskForm({ title: task.title, description: task.description, priority: task.priority, dueDate: task.dueDate || '' });
+                } else {
+                    setCurrentTask(null);
+                    setTaskForm({ title: '', description: '', priority: 'medium', dueDate: '' });
+                }
+                setIsModalOpen(true);
+            };
+
+            const closeModal = () => setIsModalOpen(false);
+
+            const filteredTasks = useMemo(() => {
+                return tasks.filter(t => {
+                    const matchesSearch = t.title.toLowerCase().includes(search.toLowerCase()) ||
+                        t.description.toLowerCase().includes(search.toLowerCase());
+                    const matchesFilter = filter === 'all' || t.status === filter;
+                    return matchesSearch && matchesFilter;
+                });
+            }, [tasks, search, filter]);
+
+            const stats = useMemo(() => {
+                return {
+                    total: tasks.length,
+                    completed: tasks.filter(t => t.status === 'completed').length,
+                    pending: tasks.filter(t => t.status === 'pending').length,
+                    in_progress: tasks.filter(t => t.status === 'in-progress').length
+                };
+            }, [tasks]);
+
+            return (
+                <div className="min-h-screen bg-gray-50 flex">
+                    {/* Sidebar - Desktop */}
+                    <aside className="hidden md:flex flex-col w-64 bg-white border-r border-gray-200 h-screen sticky top-0">
+                        <div className="p-6 border-b border-gray-100 flex items-center space-x-3">
+                            <div className="bg-indigo-600 text-white p-2 rounded-lg">
+                                <i className="fas fa-tasks"></i>
+                            </div>
+                            <h1 className="text-xl font-bold text-gray-800">NEVER FORGET</h1>
+                        </div>
+                        <nav className="flex-1 p-4 space-y-2">
+                            <button className="w-full flex items-center space-x-3 px-4 py-3 bg-indigo-50 text-indigo-700 rounded-lg font-medium transition-colors">
+                                <i className="fas fa-home w-5"></i>
+                                <span>Dashboard</span>
+                            </button>
+                            <button onClick={() => setIsProfileModalOpen(true)} className="w-full flex items-center space-x-3 px-4 py-3 text-gray-600 hover:bg-gray-50 rounded-lg font-medium transition-colors">
+                                <i className="fas fa-user w-5"></i>
+                                <span>Profile</span>
+                            </button>
+                        </nav>
+                        <div className="p-4 border-t border-gray-100">
+                            <div className="flex items-center space-x-3 mb-4 px-2">
+                                <img src={user.avatar} alt="Avatar" className="w-10 h-10 rounded-full border border-gray-200" />
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-medium text-gray-900 truncate">{user.name || user.username}</p>
+                                    <p className="text-xs text-gray-500 truncate">{user.email}</p>
+                                </div>
+                            </div>
+                            <button onClick={logout} className="w-full flex items-center justify-center space-x-2 px-4 py-2 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors text-sm">
+                                <i className="fas fa-sign-out-alt"></i>
+                                <span>Logout</span>
+                            </button>
+                        </div>
+                    </aside>
+
+                    {/* Mobile Sidebar (Drawer) */}
+                    <div className={`fixed inset-0 z-40 md:hidden ${isSidebarOpen ? 'block' : 'hidden'}`}>
+                        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)}></div>
+                        <aside className="absolute left-0 top-0 bottom-0 w-64 bg-white shadow-xl flex flex-col animate-slide-right">
+                            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+                                <div className="flex items-center space-x-2">
+                                    <div className="bg-indigo-600 text-white p-1.5 rounded-lg">
+                                        <i className="fas fa-tasks text-sm"></i>
+                                    </div>
+                                    <h1 className="text-lg font-bold text-gray-800">NEVER FORGET</h1>
+                                </div>
+                                <button onClick={() => setIsSidebarOpen(false)} className="text-gray-400 hover:text-gray-600">
+                                    <i className="fas fa-times fa-lg"></i>
+                                </button>
+                            </div>
+                            <nav className="flex-1 p-4 space-y-2">
+                                <button onClick={() => setIsSidebarOpen(false)} className="w-full flex items-center space-x-3 px-4 py-3 bg-indigo-50 text-indigo-700 rounded-lg font-medium">
+                                    <i className="fas fa-home w-5"></i>
+                                    <span>Dashboard</span>
+                                </button>
+                                <button onClick={() => { setIsProfileModalOpen(true); setIsSidebarOpen(false); }} className="w-full flex items-center space-x-3 px-4 py-3 text-gray-600 hover:bg-gray-50 rounded-lg font-medium">
+                                    <i className="fas fa-user w-5"></i>
+                                    <span>Profile</span>
+                                </button>
+                                <button onClick={logout} className="w-full flex items-center space-x-3 px-4 py-3 text-red-600 hover:bg-red-50 rounded-lg font-medium">
+                                    <i className="fas fa-sign-out-alt w-5"></i>
+                                    <span>Logout</span>
+                                </button>
+                            </nav>
+                        </aside>
+                    </div>
+
+                    {/* Main Content */}
+                    <main className="flex-1 flex flex-col h-screen overflow-hidden">
+                        {/* Mobile Header */}
+                        <header className="md:hidden bg-white shadow-sm p-4 flex items-center justify-between z-30">
+                            <button onClick={() => setIsSidebarOpen(true)} className="text-gray-600 p-2">
+                                <i className="fas fa-bars fa-lg"></i>
+                            </button>
+                            <h1 className="text-lg font-bold text-gray-800">Dashboard</h1>
+                            <div className="w-8"></div> {/* Spacer for alignment */}
+                        </header>
+
+                        <div className="flex-1 overflow-y-auto p-4 md:p-8">
+                            <div className="max-w-5xl mx-auto w-full">
+                                {/* Welcome Banner */}
+                                <div className="mb-8">
+                                    <h2 className="text-2xl font-bold text-gray-800">Welcome back, {user.username}! 👋</h2>
+                                    <p className="text-gray-500">Here's what's happening with your tasks today.</p>
+                                </div>
+
+                                {/* Stats Row */}
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                                    {[
+                                        { label: 'Total', value: stats.total, color: 'bg-blue-500', icon: 'fa-list' },
+                                        { label: 'Pending', value: stats.pending, color: 'bg-yellow-500', icon: 'fa-clock' },
+                                        { label: 'Progress', value: stats.in_progress, color: 'bg-indigo-500', icon: 'fa-spinner' },
+                                        { label: 'Done', value: stats.completed, color: 'bg-green-500', icon: 'fa-check' }
+                                    ].map((stat, idx) => (
+                                        <Card key={idx} className="flex flex-col md:flex-row items-start md:items-center justify-between p-4 bg-white border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                            <div>
+                                                <p className="text-gray-500 text-xs font-bold uppercase tracking-wider">{stat.label}</p>
+                                                <p className="text-2xl font-bold text-gray-800 mt-1">{stat.value}</p>
+                                            </div>
+                                            <div className={`${stat.color} text-white p-2 rounded-lg opacity-90 shadow-sm mt-2 md:mt-0 self-end md:self-auto`}>
+                                                <i className={`fas ${stat.icon}`}></i>
+                                            </div>
+                                        </Card>
+                                    ))}
+                                </div>
+
+                                {/* Controls */}
+                                <div className="flex flex-col md:flex-row justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-6 gap-4 sticky top-0 z-20">
+                                    <div className="flex w-full md:w-auto space-x-4">
+                                        <div className="relative flex-1 md:w-64">
+                                            <i className="fas fa-search absolute left-3 top-3 text-gray-400"></i>
+                                            <input
+                                                type="text"
+                                                placeholder="Search tasks..."
+                                                value={search}
+                                                onChange={(e) => setSearch(e.target.value)}
+                                                className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                                            />
+                                        </div>
+                                        <select
+                                            value={filter}
+                                            onChange={(e) => setFilter(e.target.value)}
+                                            className="border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer"
+                                        >
+                                            <option value="all">All</option>
+                                            <option value="pending">Pending</option>
+                                            <option value="in-progress">In Progress</option>
+                                            <option value="completed">Completed</option>
+                                        </select>
+                                    </div>
+                                    <Button onClick={() => openModal()} className="w-full md:w-auto shadow-indigo-500/20 shadow-lg">
+                                        <i className="fas fa-plus mr-2"></i> New Task
+                                    </Button>
+                                </div>
+
+                                {/* Task List */}
+                                {loading ? (
+                                    <LoadingSpinner />
+                                ) : (
+                                    <div className="grid grid-cols-1 gap-4 pb-20">
+                                        {filteredTasks.length === 0 ? (
+                                            <div className="text-center py-16 bg-white rounded-xl border border-dashed border-gray-300">
+                                                <div className="text-gray-300 mb-4 text-6xl"><i className="fas fa-clipboard-check"></i></div>
+                                                <p className="text-gray-500 font-medium">No tasks found</p>
+                                                <p className="text-gray-400 text-sm mt-1">Create a new task to get started!</p>
+                                            </div>
+                                        ) : (
+                                            filteredTasks.map(task => (
+                                                <div key={task.id} className={`group bg-white rounded-xl p-5 border shadow-sm hover:shadow-md transition-all flex flex-col md:flex-row justify-between items-start md:items-center
+                                                    ${task.status === 'completed' ? 'border-gray-200 bg-gray-50/50' : 'border-gray-100'}`}>
+
+                                                    <div className="flex-1 w-full relative pl-4">
+                                                        {/* Status Indicator Bar */}
+                                                        <div className={`absolute left-0 top-1 bottom-1 w-1 rounded-full
+                                                            ${task.status === 'completed' ? 'bg-green-500' :
+                                                                task.status === 'in-progress' ? 'bg-indigo-500' : 'bg-yellow-500'}`}></div>
+
+                                                        <div className="flex items-center justify-between md:justify-start mb-2 md:mb-0">
+                                                            <h3 className={`text-lg font-bold text-gray-800 mr-3 ${task.status === 'completed' ? 'line-through text-gray-400' : ''}`}>
+                                                                {task.title}
+                                                            </h3>
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-uppercase font-bold tracking-wider
+                                                                ${task.priority === 'high' ? 'bg-red-50 text-red-600 border border-red-100' :
+                                                                    task.priority === 'medium' ? 'bg-orange-50 text-orange-600 border border-orange-100' : 'bg-blue-50 text-blue-600 border border-blue-100'}`}>
+                                                                {task.priority}
+                                                            </span>
+                                                        </div>
+                                                        <p className={`text-sm mb-2 md:mb-0 max-w-2xl ${task.status === 'completed' ? 'text-gray-400' : 'text-gray-600'}`}>{task.description}</p>
+                                                        <div className="flex items-center space-x-4 mt-2">
+                                                            {task.dueDate && (
+                                                                <div className="text-xs text-gray-400 flex items-center">
+                                                                    <i className="far fa-calendar-alt mr-1"></i> Due: {new Date(task.dueDate).toLocaleDateString()}
+                                                                </div>
+                                                            )}
+                                                            <div className="text-xs text-gray-400 flex items-center">
+                                                                <i className="far fa-clock mr-1"></i> Created: {new Date(task.createdAt).toLocaleDateString()}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center space-x-2 mt-4 md:mt-0 w-full md:w-auto justify-end border-t md:border-t-0 border-gray-100 pt-3 md:pt-0">
+                                                        {/* Status Toggles */}
+                                                        {task.status !== 'completed' && (
+                                                            <button
+                                                                onClick={() => handleStatusChange(task, 'completed')}
+                                                                title="Mark as completed"
+                                                                className="w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors"
+                                                            >
+                                                                <i className="fas fa-check"></i>
+                                                            </button>
+                                                        )}
+                                                        {task.status === 'completed' && (
+                                                            <button
+                                                                onClick={() => handleStatusChange(task, 'pending')}
+                                                                title="Reopen task"
+                                                                className="w-8 h-8 flex items-center justify-center rounded-full text-green-600 bg-green-50 hover:bg-gray-100 hover:text-gray-500 transition-colors"
+                                                            >
+                                                                <i className="fas fa-undo"></i>
+                                                            </button>
+                                                        )}
+
+                                                        <div className="w-px h-6 bg-gray-200 mx-2"></div>
+
+                                                        <button onClick={() => openModal(task)} className="w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors">
+                                                            <i className="fas fa-pen"></i>
+                                                        </button>
+                                                        <button onClick={() => handleDelete(task.id)} className="w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors">
+                                                            <i className="fas fa-trash"></i>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </main>
+
+                    {/* Modals Container */}
+                    {/* Profile Modal */}
+                    {isProfileModalOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fade-in">
+                            <Card className="w-full max-w-lg bg-white relative animate-scale-in shadow-2xl">
+                                <button onClick={() => setIsProfileModalOpen(false)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                                    <i className="fas fa-times fa-lg"></i>
+                                </button>
+                                <h3 className="text-2xl font-bold mb-6 text-gray-800">Edit Profile</h3>
+                                <form onSubmit={handleUpdateProfile}>
+                                    <div className="flex justify-center mb-6">
+                                        <img src={user.avatar} alt="Avatar" className="w-24 h-24 rounded-full border-4 border-indigo-100 shadow-md" />
+                                    </div>
+                                    <Input
+                                        label="Full Name"
+                                        value={profileForm.name}
+                                        onChange={e => setProfileForm({ ...profileForm, name: e.target.value })}
+                                        placeholder="e.g. John Doe"
+                                    />
+                                    <Input
+                                        label="Username"
+                                        value={profileForm.username}
+                                        onChange={e => setProfileForm({ ...profileForm, username: e.target.value })}
+                                        required
+                                    />
+                                    <Input
+                                        label="Email"
+                                        type="email"
+                                        value={profileForm.email}
+                                        onChange={e => setProfileForm({ ...profileForm, email: e.target.value })}
+                                        required
+                                    />
+                                    <div className="border-t border-gray-100 my-4 pt-4">
+                                        <h4 className="text-sm font-uppercase text-gray-500 font-bold mb-3">Change Password (Optional)</h4>
+                                        <Input
+                                            label="New Password"
+                                            type="password"
+                                            value={profileForm.password}
+                                            onChange={e => setProfileForm({ ...profileForm, password: e.target.value })}
+                                            placeholder="Leave blank to keep current"
+                                        />
+                                        {profileForm.password && (
+                                            <div className="mt-3 animate-fade-in">
+                                                <Input
+                                                    label="Confirm New Password"
+                                                    type="password"
+                                                    value={profileForm.confirmPassword}
+                                                    onChange={e => setProfileForm({ ...profileForm, confirmPassword: e.target.value })}
+                                                    placeholder="Re-type new password"
+                                                    required
+                                                />
+                                                <p className="text-xs text-gray-400 mt-1">
+                                                    * Min 8 chars.
+                                                </p>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex justify-end space-x-3">
+                                        <Button variant="secondary" onClick={() => setIsProfileModalOpen(false)}>Cancel</Button>
+                                        <Button type="submit">Save Profile</Button>
+                                    </div>
+                                </form>
+                            </Card>
+                        </div>
+                    )}
+
+                    {/* Task Modal */}
+                    {isModalOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fade-in">
+                            <Card className="w-full max-w-lg bg-white relative animate-scale-in shadow-2xl">
+                                <button onClick={closeModal} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                                    <i className="fas fa-times fa-lg"></i>
+                                </button>
+                                <h3 className="text-2xl font-bold mb-6 text-gray-800">{currentTask ? 'Edit Task' : 'New Task'}</h3>
+                                <form onSubmit={handleCreateOrUpdate}>
+                                    <Input
+                                        label="Title"
+                                        value={taskForm.title}
+                                        onChange={e => setTaskForm({ ...taskForm, title: e.target.value })}
+                                        required
+                                        placeholder="e.g., Review Q3 Budget"
+                                    />
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                                        <textarea
+                                            value={taskForm.description}
+                                            onChange={e => setTaskForm({ ...taskForm, description: e.target.value })}
+                                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none h-24 resize-none"
+                                            placeholder="Add details..."
+                                        ></textarea>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4 mb-6">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                                            <select
+                                                value={taskForm.priority}
+                                                onChange={e => setTaskForm({ ...taskForm, priority: e.target.value })}
+                                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                                            >
+                                                <option value="low">Low</option>
+                                                <option value="medium">Medium</option>
+                                                <option value="high">High</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">Due Date</label>
+                                            <input
+                                                type="date"
+                                                value={taskForm.dueDate}
+                                                onChange={e => setTaskForm({ ...taskForm, dueDate: e.target.value })}
+                                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="flex justify-end space-x-3">
+                                        <Button variant="secondary" onClick={closeModal}>Cancel</Button>
+                                        <Button type="submit">{currentTask ? 'Save Changes' : 'Create Task'}</Button>
+                                    </div>
+                                </form>
+                            </Card>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        /* ==================== APP ROUTING & ROOT ==================== */
+
+        // --- ROUTING & PROTECTION ---
+
+        const ProtectedRoute = ({ children }) => {
+            const { user, loading } = useAuth();
+
+            if (loading) return <div className="h-screen flex items-center justify-center bg-gray-50"><LoadingSpinner /></div>;
+
+            // In a real router, we'd use <Navigate to="/login" />
+            // Here we just return null because the App component handles the switch, 
+            // but this component verifies the security state.
+            if (!user) return null;
+
+            return children;
+        };
+
+        const App = () => {
+            const { user, loading } = useAuth();
+            const [view, setView] = useState('login'); // login, signup
+
+            if (loading) return <div className="h-screen flex items-center justify-center bg-gray-50"><LoadingSpinner /></div>;
+
+            // Simplified Routing Logic
+            return (
+                <React.Fragment>
+                    {user ? (
+                        <ProtectedRoute>
+                            <Dashboard />
+                        </ProtectedRoute>
+                    ) : (
+                        view === 'login' ? (
+                            <LoginView onSwitchToSignup={() => setView('signup')} />
+                        ) : (
+                            <SignupView onSwitchToLogin={() => setView('login')} />
+                        )
+                    )}
+                </React.Fragment>
+            );
+        };
+
+        const Root = () => (
+            <ToastProvider>
+                <AuthProvider>
+                    <App />
+                </AuthProvider>
+            </ToastProvider>
+        );
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<Root />);
+    </script>
+
+    <!-- Animation Styles -->
+    <style>
+        @keyframes blob {
+            0% {
+                transform: translate(0px, 0px) scale(1);
+            }
+
+            33% {
+                transform: translate(30px, -50px) scale(1.1);
+            }
+
+            66% {
+                transform: translate(-20px, 20px) scale(0.9);
+            }
+
+            100% {
+                transform: translate(0px, 0px) scale(1);
+            }
+        }
+
+        .animate-blob {
+            animation: blob 7s infinite;
+        }
+
+        .animation-delay-2000 {
+            animation-delay: 2s;
+        }
+
+        .animation-delay-4000 {
+            animation-delay: 4s;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+
+        .animate-fade-in {
+            animation: fadeIn 0.2s ease-out forwards;
+        }
+
+        @keyframes scaleIn {
+            from {
+                transform: scale(0.95);
+                opacity: 0;
+            }
+
+            to {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        .animate-scale-in {
+            animation: scaleIn 0.2s ease-out forwards;
+        }
+
+        @keyframes slideRight {
+            from {
+                transform: translateX(-100%);
+            }
+
+            to {
+                transform: translateX(0);
+            }
+        }
+
+        .animate-slide-right {
+            animation: slideRight 0.3s ease-out forwards;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        .animate-slide-in {
+            animation: slideIn 0.3s ease-out forwards;
+        }
+    </style>
+</body>
+
+<!--
+    ===========================================================================
+    🚀 HOW TO SCALE THIS APP FOR PRODUCTION
+    ===========================================================================
+
+    This application is currently a "Monolith in a File" for demonstration purposes.
+    To scale this for a real-world user base (10,000+ users), follow this migration path:
+
+    1. 🏗️ BACKEND ARCHITECTURE (Node.js/Express)
+       - Extract the `api` object and `Controllers` into a dedicated Node.js/Express server.
+       - Replace `localStorage` (DB object) with a real database.
+       - Use an ORM like Prisma or Mongoose.
+
+    2. 🗄️ DATABASE
+       - **PostgreSQL**: Best for relational data (Users, Tasks, Relations).
+         - Hosting: Supabase, Neon, or AWS RDS.
+       - **MongoDB**: Good alternate if data structure is highly variable.
+         - Hosting: MongoDB Atlas.
+
+    3. 🔒 SECURITY
+       - **Authentication**: Replace simulated JWT with real `jsonwebtoken` library and HttpOnly cookies.
+       - **BCrypt**: Move hashing to the server-side (NEVER hash on client in production).
+       - **Rate Limiting**: Use `express-rate-limit` to prevent brute-force attacks.
+       - **CORS**: Configure Strict CORS headers to allow only your frontend domain.
+
+    4. 🌐 DEPLOYMENT
+       - **Frontend**:
+         - Move React code to a Vite project (`npm create vite@latest`).
+         - Deploy to **Vercel** or **Netlify** for global CDN distribution.
+       - **Backend**:
+         - Deploy the Node.js API to **Render**, **Railway**, or **Heroku**.
+
+    5. ⚡ PERFORMANCE
+       - **Caching**: Use **Redis** to cache API responses (e.g., `getTasks`) to reduce DB load.
+       - **Pagination**: Implement server-side pagination for tasks (don't send all 1000 tasks at once).
+       - **Optimistic UI**: Use libraries like `TanStack Query` for better state management and caching on the frontend.
+
+    ===========================================================================
+    -->
+
+</html>
